@@ -112,6 +112,7 @@ function buildAgentCommandInput(params: {
   runId: string;
   messageChannel: string;
   senderIsOwner: boolean;
+  abortSignal?: AbortSignal;
 }) {
   return {
     message: params.prompt.message,
@@ -125,6 +126,7 @@ function buildAgentCommandInput(params: {
     bestEffortDeliver: false as const,
     senderIsOwner: params.senderIsOwner,
     allowModelOverride: true as const,
+    abortSignal: params.abortSignal,
   };
 }
 
@@ -493,6 +495,7 @@ export async function handleOpenAiHttpRequest(
 
   const runId = `chatcmpl_${randomUUID()}`;
   const deps = createDefaultDeps();
+  const abortController = new AbortController();
   const commandInput = buildAgentCommandInput({
     prompt: {
       message: prompt.message,
@@ -503,12 +506,26 @@ export async function handleOpenAiHttpRequest(
     sessionKey,
     runId,
     messageChannel,
+    abortSignal: abortController.signal,
     senderIsOwner,
   });
 
   if (!stream) {
+    // Listen on `res` instead of `req` because handleGatewayPostJsonEndpoint has already
+    // consumed the request body, causing IncomingMessage to auto-destroy and emit `close`
+    // before we reach this point. ServerResponse stays alive until the response is written,
+    // so its `close` event reliably fires on premature client disconnect.
+    res.on("close", () => {
+      if (!abortController.signal.aborted) {
+        abortController.abort();
+      }
+    });
     try {
       const result = await agentCommandFromIngress(commandInput, defaultRuntime, deps);
+
+      if (abortController.signal.aborted) {
+        return true;
+      }
 
       const content = resolveAgentResponseText(result);
 
@@ -527,6 +544,9 @@ export async function handleOpenAiHttpRequest(
         usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 },
       });
     } catch (err) {
+      if (abortController.signal.aborted) {
+        return true;
+      }
       logWarn(`openai-compat: chat completion failed: ${String(err)}`);
       sendJson(res, 500, {
         error: { message: "internal error", type: "api_error" },
@@ -581,7 +601,16 @@ export async function handleOpenAiHttpRequest(
     }
   });
 
-  req.on("close", () => {
+  // Listen on `res` instead of `req` because handleGatewayPostJsonEndpoint has already
+  // consumed the request body, causing IncomingMessage to auto-destroy and emit `close`
+  // before we reach this point. ServerResponse stays alive until the response is written,
+  // so its `close` event reliably fires on premature client disconnect.
+  res.on("close", () => {
+    // Only abort on genuine client disconnect; when we called res.end()
+    // ourselves, closed is already true so we skip the abort.
+    if (!closed) {
+      abortController.abort();
+    }
     closed = true;
     unsubscribe();
   });
