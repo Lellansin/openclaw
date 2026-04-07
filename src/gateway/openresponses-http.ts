@@ -34,7 +34,7 @@ import { wrapExternalContent } from "../security/external-content.js";
 import { resolveAssistantStreamDeltaText } from "./agent-event-assistant-text.js";
 import type { AuthRateLimiter } from "./auth-rate-limit.js";
 import type { ResolvedGatewayAuth } from "./auth.js";
-import { sendJson, setSseHeaders, writeDone } from "./http-common.js";
+import { sendJson, setSseHeaders, watchClientDisconnect, writeDone } from "./http-common.js";
 import { handleGatewayPostJsonEndpoint } from "./http-endpoint-helpers.js";
 import {
   getBearerToken,
@@ -684,15 +684,7 @@ export async function handleOpenResponsesHttpRequest(
       : undefined;
 
   if (!stream) {
-    // Listen on `res` instead of `req` because handleGatewayPostJsonEndpoint has already
-    // consumed the request body, causing IncomingMessage to auto-destroy and emit `close`
-    // before we reach this point. ServerResponse stays alive until the response is written,
-    // so its `close` event reliably fires on premature client disconnect.
-    res.on("close", () => {
-      if (!abortController.signal.aborted) {
-        abortController.abort();
-      }
-    });
+    const stopWatchingDisconnect = watchClientDisconnect(req, res, abortController);
     try {
       const result = await runResponsesAgentCommand({
         message: prompt.message,
@@ -802,6 +794,8 @@ export async function handleOpenResponsesHttpRequest(
       });
       rememberResponseSession();
       sendJson(res, 500, response);
+    } finally {
+      stopWatchingDisconnect();
     }
     return true;
   }
@@ -816,6 +810,7 @@ export async function handleOpenResponsesHttpRequest(
   let sawAssistantDelta = false;
   let closed = false;
   let unsubscribe = () => {};
+  let stopWatchingDisconnect = () => {};
   let finalUsage: Usage | undefined;
   let finalizeRequested: { status: ResponseResource["status"]; text: string } | null = null;
 
@@ -832,6 +827,7 @@ export async function handleOpenResponsesHttpRequest(
     const usage = finalUsage;
 
     closed = true;
+    stopWatchingDisconnect();
     unsubscribe();
 
     writeSseEvent(res, {
@@ -960,16 +956,7 @@ export async function handleOpenResponsesHttpRequest(
     }
   });
 
-  // Listen on `res` instead of `req` because handleGatewayPostJsonEndpoint has already
-  // consumed the request body, causing IncomingMessage to auto-destroy and emit `close`
-  // before we reach this point. ServerResponse stays alive until the response is written,
-  // so its `close` event reliably fires on premature client disconnect.
-  res.on("close", () => {
-    // Only abort on genuine client disconnect; when we called res.end()
-    // ourselves, closed is already true so we skip the abort.
-    if (!closed) {
-      abortController.abort();
-    }
+  stopWatchingDisconnect = watchClientDisconnect(req, res, abortController, () => {
     closed = true;
     unsubscribe();
   });
@@ -1076,6 +1063,7 @@ export async function handleOpenResponsesHttpRequest(
           usage,
         });
         closed = true;
+        stopWatchingDisconnect();
         unsubscribe();
         rememberResponseSession();
         writeSseEvent(res, { type: "response.completed", response: incompleteResponse });

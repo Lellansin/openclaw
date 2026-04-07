@@ -25,7 +25,7 @@ import {
 } from "./agent-prompt.js";
 import type { AuthRateLimiter } from "./auth-rate-limit.js";
 import type { ResolvedGatewayAuth } from "./auth.js";
-import { sendJson, setSseHeaders, writeDone } from "./http-common.js";
+import { sendJson, setSseHeaders, watchClientDisconnect, writeDone } from "./http-common.js";
 import { handleGatewayPostJsonEndpoint } from "./http-endpoint-helpers.js";
 import {
   resolveGatewayRequestContext,
@@ -511,15 +511,7 @@ export async function handleOpenAiHttpRequest(
   });
 
   if (!stream) {
-    // Listen on `res` instead of `req` because handleGatewayPostJsonEndpoint has already
-    // consumed the request body, causing IncomingMessage to auto-destroy and emit `close`
-    // before we reach this point. ServerResponse stays alive until the response is written,
-    // so its `close` event reliably fires on premature client disconnect.
-    res.on("close", () => {
-      if (!abortController.signal.aborted) {
-        abortController.abort();
-      }
-    });
+    const stopWatchingDisconnect = watchClientDisconnect(req, res, abortController);
     try {
       const result = await agentCommandFromIngress(commandInput, defaultRuntime, deps);
 
@@ -551,6 +543,8 @@ export async function handleOpenAiHttpRequest(
       sendJson(res, 500, {
         error: { message: "internal error", type: "api_error" },
       });
+    } finally {
+      stopWatchingDisconnect();
     }
     return true;
   }
@@ -560,6 +554,7 @@ export async function handleOpenAiHttpRequest(
   let wroteRole = false;
   let sawAssistantDelta = false;
   let closed = false;
+  let stopWatchingDisconnect = () => {};
 
   const unsubscribe = onAgentEvent((evt) => {
     if (evt.runId !== runId) {
@@ -594,6 +589,7 @@ export async function handleOpenAiHttpRequest(
       const phase = evt.data?.phase;
       if (phase === "end" || phase === "error") {
         closed = true;
+        stopWatchingDisconnect();
         unsubscribe();
         writeDone(res);
         res.end();
@@ -601,16 +597,7 @@ export async function handleOpenAiHttpRequest(
     }
   });
 
-  // Listen on `res` instead of `req` because handleGatewayPostJsonEndpoint has already
-  // consumed the request body, causing IncomingMessage to auto-destroy and emit `close`
-  // before we reach this point. ServerResponse stays alive until the response is written,
-  // so its `close` event reliably fires on premature client disconnect.
-  res.on("close", () => {
-    // Only abort on genuine client disconnect; when we called res.end()
-    // ourselves, closed is already true so we skip the abort.
-    if (!closed) {
-      abortController.abort();
-    }
+  stopWatchingDisconnect = watchClientDisconnect(req, res, abortController, () => {
     closed = true;
     unsubscribe();
   });
@@ -658,6 +645,7 @@ export async function handleOpenAiHttpRequest(
     } finally {
       if (!closed) {
         closed = true;
+        stopWatchingDisconnect();
         unsubscribe();
         writeDone(res);
         res.end();
