@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { ImageContent } from "../agents/command/types.js";
-import { normalizeUsage } from "../agents/usage.js";
+import { normalizeUsage, toOpenAiChatCompletionsUsage } from "../agents/usage.js";
 import { createDefaultDeps } from "../cli/deps.js";
 import { agentCommandFromIngress } from "../commands/agent.js";
 import type { GatewayHttpChatCompletionsConfig } from "../config/types.gateway.js";
@@ -483,29 +483,7 @@ function resolveChatCompletionUsage(result: unknown): {
   completion_tokens: number;
   total_tokens: number;
 } {
-  const usage = normalizeUsage(resolveRawAgentUsage(result));
-
-  // Keep the wire-format aligned with OpenAI chat completions:
-  // prompt_tokens includes prompt input plus cache-read reuse, but not cache-write overhead.
-  const input = usage?.input ?? 0;
-  const output = usage?.output ?? 0;
-  const cacheRead = usage?.cacheRead ?? 0;
-  const promptTokens = input + cacheRead;
-  const completionTokens = output;
-  const hasComponentBreakdown =
-    usage?.input !== undefined ||
-    usage?.output !== undefined ||
-    usage?.cacheRead !== undefined ||
-    usage?.cacheWrite !== undefined;
-  const totalTokens = hasComponentBreakdown
-    ? promptTokens + completionTokens
-    : Math.max(0, usage?.total ?? 0);
-
-  return {
-    prompt_tokens: Math.max(0, promptTokens),
-    completion_tokens: Math.max(0, completionTokens),
-    total_tokens: Math.max(0, totalTokens),
-  };
+  return toOpenAiChatCompletionsUsage(normalizeUsage(resolveRawAgentUsage(result)));
 }
 
 function resolveIncludeUsageForStreaming(payload: OpenAiChatCompletionRequest): boolean {

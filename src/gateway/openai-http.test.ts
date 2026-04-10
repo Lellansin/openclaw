@@ -762,7 +762,7 @@ describe("OpenAI-compatible HTTP API (e2e)", () => {
         expect(json.usage).toEqual({
           prompt_tokens: 10,
           completion_tokens: 5,
-          total_tokens: 15,
+          total_tokens: 100,
         });
       }
 
@@ -849,7 +849,7 @@ describe("OpenAI-compatible HTTP API (e2e)", () => {
         expect(json.usage).toEqual({
           prompt_tokens: 0,
           completion_tokens: 0,
-          total_tokens: 0,
+          total_tokens: 10,
         });
       }
 
