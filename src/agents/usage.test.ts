@@ -202,6 +202,33 @@ describe("toOpenAiChatCompletionsUsage", () => {
       total_tokens: 200,
     });
   });
+
+  it("clamps negative completion before deriving total_tokens", () => {
+    expect(
+      toOpenAiChatCompletionsUsage({
+        input: 3,
+        output: -5,
+      }),
+    ).toEqual({
+      prompt_tokens: 3,
+      completion_tokens: 0,
+      total_tokens: 3,
+    });
+  });
+
+  it("preserves aggregate total when components are partially negative", () => {
+    expect(
+      toOpenAiChatCompletionsUsage({
+        input: 3,
+        output: -5,
+        total: 7,
+      }),
+    ).toEqual({
+      prompt_tokens: 3,
+      completion_tokens: 0,
+      total_tokens: 7,
+    });
+  });
 });
 
 describe("hasNonzeroUsage", () => {

@@ -160,8 +160,8 @@ export function toOpenAiChatCompletionsUsage(usage: NormalizedUsage | undefined)
   const input = usage?.input ?? 0;
   const output = usage?.output ?? 0;
   const cacheRead = usage?.cacheRead ?? 0;
-  const promptTokens = input + cacheRead;
-  const completionTokens = output;
+  const promptTokens = Math.max(0, input + cacheRead);
+  const completionTokens = Math.max(0, output);
   const componentTotal = promptTokens + completionTokens;
   const aggregateRaw = usage?.total;
   const aggregateTotal =
@@ -172,9 +172,9 @@ export function toOpenAiChatCompletionsUsage(usage: NormalizedUsage | undefined)
     aggregateTotal !== undefined ? Math.max(componentTotal, aggregateTotal) : componentTotal;
 
   return {
-    prompt_tokens: Math.max(0, promptTokens),
-    completion_tokens: Math.max(0, completionTokens),
-    total_tokens: Math.max(0, totalTokens),
+    prompt_tokens: promptTokens,
+    completion_tokens: completionTokens,
+    total_tokens: totalTokens,
   };
 }
 
