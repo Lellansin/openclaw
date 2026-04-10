@@ -693,6 +693,19 @@ export async function handleOpenAiHttpRequest(
     if (closed || !finalizeRequested) {
       return;
     }
+    // This usage gate intentionally mirrors openresponses-http.ts. Once finalize
+    // has been requested, the remaining wait is for the agent command promise to
+    // settle and provide the final usage state for the last SSE chunk.
+    //
+    // Current runner contract:
+    // - success: assigns real finalUsage, then requests finalize
+    // - error/timeout: assigns zeroed finalUsage via the lifecycle:error path,
+    //   then requests finalize
+    // - client disconnect: closes early via abort/watchClientDisconnect
+    //
+    // So this does not create a chat-completions-only infinite wait; a shorter
+    // HTTP-specific bounded fallback would be a shared adapter decision for both
+    // this endpoint and openresponses-http.ts.
     if (streamIncludeUsage && !finalUsage) {
       return;
     }
