@@ -68,6 +68,7 @@ const DEFAULT_OPENAI_CHAT_COMPLETIONS_BODY_BYTES = 20 * 1024 * 1024;
 const IMAGE_ONLY_USER_MESSAGE = "User sent image(s) with no text.";
 const DEFAULT_OPENAI_MAX_IMAGE_PARTS = 8;
 const DEFAULT_OPENAI_MAX_TOTAL_IMAGE_BYTES = 20 * 1024 * 1024;
+const STREAM_USAGE_FINALIZE_GRACE_MS = 2_000;
 const DEFAULT_OPENAI_IMAGE_LIMITS: InputImageLimits = {
   allowUrl: false,
   allowedMimes: new Set(DEFAULT_INPUT_IMAGE_MIMES),
@@ -647,47 +648,46 @@ export async function handleOpenAiHttpRequest(
   let finalizeRequested = false;
   let closed = false;
   let stopWatchingDisconnect = () => {};
+  let finalizeTimer: ReturnType<typeof setTimeout> | undefined;
 
-  // Streaming finalize gate intentionally mirrors openresponses-http.ts:
-  // lifecycle:end requests finalize, while the command result supplies finalUsage.
-  // When stream_options.include_usage=true, both signals must arrive before the
-  // stream closes so the final usage chunk is emitted before [DONE].
-  //
-  // This does not leave the stream permanently hung waiting for usage. The
-  // agentCommandFromIngress promise always settles via normal completion, timeout,
-  // or abort. On success, the IIFE sets finalUsage from the command result and
-  // calls requestFinalize(); its finally path also emits lifecycle:end, which in
-  // turn calls requestFinalize(). On error or timeout, the catch path sets a
-  // zeroed finalUsage, emits lifecycle:error, and calls requestFinalize(). That
-  // means the same runner-level failure path already produces the fallback final
-  // usage state before this HTTP adapter tries to close the stream.
-  //
-  // Client disconnect is the separate early-exit case: watchClientDisconnect()
-  // marks the stream closed and aborts the runner, then the rejected promise
-  // returns early from catch because closed/aborted is already true.
-  // Whether adapters should also add a shorter HTTP-specific bounded fallback
-  // remains a shared adapter decision rather than a chat-completions-only change.
+  const clearFinalizeTimer = () => {
+    if (!finalizeTimer) {
+      return;
+    }
+    clearTimeout(finalizeTimer);
+    finalizeTimer = undefined;
+  };
+
+  const armFinalizeTimer = () => {
+    if (!streamIncludeUsage || finalUsage || finalizeTimer || closed) {
+      return;
+    }
+    finalizeTimer = setTimeout(() => {
+      finalizeTimer = undefined;
+      if (closed || finalUsage) {
+        return;
+      }
+      finalUsage = {
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: 0,
+      };
+      if (!abortController.signal.aborted) {
+        abortController.abort();
+      }
+      maybeFinalize();
+    }, STREAM_USAGE_FINALIZE_GRACE_MS);
+  };
+
   const maybeFinalize = () => {
     if (closed || !finalizeRequested) {
       return;
     }
-    // This usage gate intentionally mirrors openresponses-http.ts. Once finalize
-    // has been requested, the remaining wait is for the agent command promise to
-    // settle and provide the final usage state for the last SSE chunk.
-    //
-    // Current runner contract:
-    // - success: assigns real finalUsage, then requests finalize
-    // - error/timeout: assigns zeroed finalUsage via the lifecycle:error path,
-    //   then requests finalize
-    // - client disconnect: closes early via abort/watchClientDisconnect
-    //
-    // So this does not create a chat-completions-only infinite wait; a shorter
-    // HTTP-specific bounded fallback would be a shared adapter decision for both
-    // this endpoint and openresponses-http.ts.
     if (streamIncludeUsage && !finalUsage) {
       return;
     }
     closed = true;
+    clearFinalizeTimer();
     stopWatchingDisconnect();
     unsubscribe();
     if (!wroteStopChunk) {
@@ -703,6 +703,7 @@ export async function handleOpenAiHttpRequest(
 
   const requestFinalize = () => {
     finalizeRequested = true;
+    armFinalizeTimer();
     maybeFinalize();
   };
 
@@ -745,6 +746,7 @@ export async function handleOpenAiHttpRequest(
 
   stopWatchingDisconnect = watchClientDisconnect(req, res, abortController, () => {
     closed = true;
+    clearFinalizeTimer();
     unsubscribe();
   });
 
