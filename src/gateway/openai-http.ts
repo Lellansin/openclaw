@@ -716,6 +716,16 @@ function resolveIncludeUsageForStreaming(payload: OpenAiChatCompletionRequest): 
   return (streamOptions as { include_usage?: unknown }).include_usage === true;
 }
 
+function resolveErrorMessage(err: unknown): string {
+  if (err instanceof Error) {
+    const message = err.message.trim();
+    if (message) {
+      return message;
+    }
+  }
+  return String(err);
+}
+
 export async function handleOpenAiHttpRequest(
   req: IncomingMessage,
   res: ServerResponse,
@@ -784,7 +794,7 @@ export async function handleOpenAiHttpRequest(
   } catch (err) {
     sendJson(res, 400, {
       error: {
-        message: `Invalid tools/tool_choice: ${String(err)}`,
+        message: `Invalid tools/tool_choice: ${resolveErrorMessage(err)}`,
         type: "invalid_request_error",
       },
     });
