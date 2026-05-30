@@ -139,7 +139,7 @@ describe("buildGoogleGenerateContentParams", () => {
   it("forwards stop sequences to Google generation config", () => {
     const params = buildGoogleGenerateContentParams(
       model,
-      { messages: [{ role: "user", content: "hello" }] },
+      { messages: [{ role: "user", content: "hello", timestamp: 0 }] },
       { stop: ["STOP"] },
     );
 
