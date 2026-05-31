@@ -49,6 +49,12 @@ import {
 } from "./http-utils.js";
 import { normalizeInputHostnameAllowlist } from "./input-allowlist.js";
 import { resolveOpenAiCompatError, validateOpenAiSamplingParams } from "./openai-compat-errors.js";
+import {
+  isToolChoiceConstraintSatisfied,
+  resolveUnsatisfiedToolChoiceMessage,
+  toolChoiceConstraintPrompt,
+  type ToolChoiceConstraint,
+} from "./openai-tool-choice.js";
 
 type OpenAiHttpOptions = {
   auth: ResolvedGatewayAuth;
@@ -67,10 +73,6 @@ type OpenAiChatMessage = {
   tool_calls?: unknown;
   stopReason?: unknown;
 };
-
-type ChatToolChoiceConstraint =
-  | { type: "required" }
-  | { type: "function"; name: string };
 
 type OpenAiChatCompletionRequest = {
   model?: unknown;
@@ -212,7 +214,7 @@ function extractClientToolsFromChatRequest(tools: unknown): ClientToolDefinition
 function applyChatToolChoice(params: { tools: ClientToolDefinition[]; toolChoice: unknown }): {
   tools: ClientToolDefinition[];
   extraSystemPrompt?: string;
-  constraint?: ChatToolChoiceConstraint;
+  constraint?: ToolChoiceConstraint;
 } {
   const { tools, toolChoice } = params;
   if (toolChoice == null || toolChoice === "auto") {
@@ -225,11 +227,8 @@ function applyChatToolChoice(params: { tools: ClientToolDefinition[]; toolChoice
     if (tools.length === 0) {
       throw new Error("tool_choice=required but no tools were provided");
     }
-    return {
-      tools,
-      extraSystemPrompt: "You must call one of the available tools before responding.",
-      constraint: { type: "required" },
-    };
+    const constraint: ToolChoiceConstraint = { type: "required" };
+    return { tools, extraSystemPrompt: toolChoiceConstraintPrompt(constraint), constraint };
   }
   if (typeof toolChoice !== "object" || Array.isArray(toolChoice)) {
     throw new Error("tool_choice must be a string or object");
@@ -246,41 +245,17 @@ function applyChatToolChoice(params: { tools: ClientToolDefinition[]; toolChoice
     if (matched.length === 0) {
       throw new Error(`tool_choice requested unknown tool: ${targetName}`);
     }
+    const constraint: ToolChoiceConstraint = { type: "function", name: targetName };
     return {
       tools: matched,
-      extraSystemPrompt: `You must call the ${targetName} tool before responding.`,
-      constraint: { type: "function", name: targetName },
+      extraSystemPrompt: toolChoiceConstraintPrompt(constraint),
+      constraint,
     };
   }
   if (typeof choiceType !== "string") {
     throw new Error("unsupported tool_choice type");
   }
   throw new Error(`tool_choice ${choiceType} is not supported`);
-}
-
-function isChatToolChoiceConstraintSatisfied(params: {
-  constraint: ChatToolChoiceConstraint | undefined;
-  pendingToolCalls: Array<{ name: string }> | undefined;
-}): boolean {
-  const { constraint, pendingToolCalls } = params;
-  if (!constraint) {
-    return true;
-  }
-  if (!pendingToolCalls || pendingToolCalls.length === 0) {
-    return false;
-  }
-  if (constraint.type === "required") {
-    return true;
-  }
-  return pendingToolCalls.some((call) => call.name === constraint.name);
-}
-
-function resolveUnsatisfiedChatToolChoiceMessage(
-  constraint: ChatToolChoiceConstraint,
-): string {
-  return constraint.type === "function"
-    ? `tool_choice required a ${constraint.name} tool call, but the agent did not produce one`
-    : "tool_choice=required was not satisfied by the agent response";
 }
 
 function writeAssistantRoleChunk(res: ServerResponse, params: { runId: string; model: string }) {
@@ -1008,7 +983,7 @@ export async function handleOpenAiHttpRequest(
   const prompt = buildAgentPrompt(payload.messages, activeTurnContext.activeUserMessageIndex);
   let resolvedClientTools: ClientToolDefinition[] = [];
   let toolChoicePrompt: string | undefined;
-  let toolChoiceConstraint: ChatToolChoiceConstraint | undefined;
+  let toolChoiceConstraint: ToolChoiceConstraint | undefined;
   try {
     const parsedClientTools = extractClientToolsFromChatRequest(payload.tools);
     const toolChoiceResult = applyChatToolChoice({
@@ -1087,14 +1062,14 @@ export async function handleOpenAiHttpRequest(
 
       if (
         toolChoiceConstraint &&
-        !isChatToolChoiceConstraintSatisfied({
+        !isToolChoiceConstraintSatisfied({
           constraint: toolChoiceConstraint,
           pendingToolCalls,
         })
       ) {
         sendJson(res, 502, {
           error: {
-            message: resolveUnsatisfiedChatToolChoiceMessage(toolChoiceConstraint),
+            message: resolveUnsatisfiedToolChoiceMessage(toolChoiceConstraint),
             type: "api_error",
           },
         });
@@ -1276,7 +1251,7 @@ export async function handleOpenAiHttpRequest(
 
       if (
         toolChoiceConstraint &&
-        !isChatToolChoiceConstraintSatisfied({
+        !isToolChoiceConstraintSatisfied({
           constraint: toolChoiceConstraint,
           pendingToolCalls,
         })
@@ -1286,7 +1261,7 @@ export async function handleOpenAiHttpRequest(
         unsubscribe();
         writeSse(res, {
           error: {
-            message: resolveUnsatisfiedChatToolChoiceMessage(toolChoiceConstraint),
+            message: resolveUnsatisfiedToolChoiceMessage(toolChoiceConstraint),
             type: "api_error",
           },
         });
